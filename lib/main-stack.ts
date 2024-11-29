@@ -1,4 +1,4 @@
-import { Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
+import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
 import { Construct } from "constructs";
 
 interface VpcStackProps extends StackProps {
@@ -35,7 +35,7 @@ export class MainStack extends Stack {
         const listener = this.createAlbListener(alb, cert);
         const fargateService = this.createService(cluster, listener, ecsSecurityGroup, repo, 256, 512);
         this.createAlbDomain(alb, domainName, hostedZoneId, subDomainName);
-        // this.evenbridge(repo, cluster, fargateService);
+        this.evenbridge(repo, cluster, fargateService);
     }
 
     private createVpc(vpcName: string, natGateways: number): aws_ec2.Vpc {
@@ -187,6 +187,10 @@ export class MainStack extends Stack {
                 mode: aws_ecs.AwsLogDriverMode.NON_BLOCKING,
                 logRetention: aws_logs.RetentionDays.ONE_DAY,
             }),
+            // healthCheck: {
+            //     command: ['CMD-SHELL', 'curl --fail http://localhost:8080/health || exit 1'],
+            //     interval: Duration.seconds(30),
+            // },
             portMappings: [{ containerPort }]
         })
         
@@ -201,6 +205,11 @@ export class MainStack extends Stack {
             maxHealthyPercent: 200,
             enableExecuteCommand: true,
           });
+          
+          service.taskDefinition.taskRole.addManagedPolicy(
+            aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
+          );
+      
 
         // autoscaling
         const scaling = service.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 2 });
@@ -214,6 +223,7 @@ export class MainStack extends Stack {
             healthCheck: {
               protocol: aws_elasticloadbalancingv2.Protocol.HTTP,
               path: '/health',
+              interval: Duration.seconds(120),
             },
         });
 
@@ -239,13 +249,13 @@ export class MainStack extends Stack {
             taskDefinition: service.taskDefinition,
             role: service.taskDefinition.taskRole,
             containerOverrides: [{
-            containerName: 'my-container-name',
-            environment: [
-                {
-                    name: 'IMAGE_URI',
-                    value: `${repository.repositoryUri}:latest`,
-                },
-            ],
+                containerName: 'app',
+                environment: [
+                    {
+                        name: 'IMAGE_URI',
+                        value: `${repository.repositoryUri}:latest`,
+                    },
+                ],
             }],
         }));
     }

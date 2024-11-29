@@ -17,3 +17,5 @@ push-to-ecr:
 	docker tag my-repo:latest $(ACCOUNT_ID).dkr.ecr.$(REGION).amazonaws.com/my-repo:latest
 	docker push $(ACCOUNT_ID).dkr.ecr.$(REGION).amazonaws.com/my-repo:latest
 
+run-image:
+	docker run -p 8080:8080 $(ACCOUNT_ID).dkr.ecr.$(REGION).amazonaws.com/my-repo

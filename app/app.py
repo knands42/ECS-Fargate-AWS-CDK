@@ -12,8 +12,12 @@ def health():
     return "OK"
 
 @app.route("/test")
-def health():
+def TestRoute():
     return "Tested"
+
+@app.route("/test-again")
+def TestRoute2():
+    return "Tested 2"
 
 if __name__ == "__main__":
     hello_world()
