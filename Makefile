@@ -3,11 +3,11 @@ ACCOUNT_ID := $(shell aws sts get-caller-identity --query "Account" --output tex
 
 .PHONY: destroy
 destroy:
-	cdk destroy all-in --require-approval never
+	cdk destroy --all --require-approval never
 
 .PHONY: deploy
 deploy:
-	cdk deploy all-in --require-approval never
+	cdk deploy --all --require-approval never
 
 .PHONY: push-to-ecr
 push-to-ecr:

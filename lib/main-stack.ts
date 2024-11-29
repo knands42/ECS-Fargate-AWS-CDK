@@ -1,4 +1,4 @@
-import { Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_iam, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
+import { Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
 import { Construct } from "constructs";
 
 interface VpcStackProps extends StackProps {
@@ -33,8 +33,9 @@ export class MainStack extends Stack {
         const cluster = this.createCluster('main', vpc);
         const alb = this.createAlb('main', vpc);
         const listener = this.createAlbListener(alb, cert);
-        this.createService(cluster, listener, ecsSecurityGroup, repo, 256, 512);
+        const fargateService = this.createService(cluster, listener, ecsSecurityGroup, repo, 256, 512);
         this.createAlbDomain(alb, domainName, hostedZoneId, subDomainName);
+        // this.evenbridge(repo, cluster, fargateService);
     }
 
     private createVpc(vpcName: string, natGateways: number): aws_ec2.Vpc {
@@ -217,5 +218,35 @@ export class MainStack extends Stack {
         });
 
         return service
+    }
+
+    private evenbridge(repository: aws_ecr.IRepository, cluster: aws_ecs.ICluster, service: aws_ecs.FargateService) {
+        // EventBridge Rule for ECR Image Push
+        const rule = new aws_events.Rule(this, 'EcrImagePushRule', {
+            eventPattern: {
+                source: ['aws.ecr'],
+                detailType: ['ECR Image Action'],
+                detail: {
+                    'action-type': ['PUSH'],
+                    'repository-name': [repository.repositoryName],
+                },
+            },
+        });
+    
+        // EventBridge Target: ECS Service Deployment
+        rule.addTarget(new aws_events_targets.EcsTask({
+            cluster,
+            taskDefinition: service.taskDefinition,
+            role: service.taskDefinition.taskRole,
+            containerOverrides: [{
+            containerName: 'my-container-name',
+            environment: [
+                {
+                    name: 'IMAGE_URI',
+                    value: `${repository.repositoryUri}:latest`,
+                },
+            ],
+            }],
+        }));
     }
 }

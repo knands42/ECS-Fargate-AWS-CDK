@@ -11,6 +11,10 @@ def hello_world():
 def health():
     return "OK"
 
+@app.route("/test")
+def health():
+    return "Tested"
+
 if __name__ == "__main__":
     hello_world()
     app.run(host="0.0.0.0", port=8080)
