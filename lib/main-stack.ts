@@ -38,7 +38,6 @@ export class MainStack extends Stack {
         const alb = this.createAlb('main', vpc);
         const listener = this.createAlbListener(alb, cert);
 
-
         const envVars = {
             PORT: this.containerPort.toString(),
         }
@@ -151,6 +150,7 @@ export class MainStack extends Stack {
      * @param certificate the SSL certificate to use for the listener
      * @returns the created listener
      */
+    // TODO: add support for multiple listeners, https for public subnet and http for private subnet
     private createAlbListener(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, certificate: aws_certificatemanager.ICertificate) {
         const listener = alb.addListener(`HttpsListener`, {
           port: 443,
@@ -323,6 +323,7 @@ export class MainStack extends Stack {
      * @param fargateService The ECS Service to update.
      * @param taskDefinition The ECS Task Definition to use for the update.
      */
+    // TODO: Node JS Function
     private lambda(
         cluster: aws_ecs.ICluster,
         fargateService: aws_ecs.FargateService,
@@ -370,12 +371,12 @@ export class MainStack extends Stack {
     ) {
         new aws_events.Rule(this, 'EcrPushEventRule', {
             eventPattern: {
-            source: ['aws.ecr'],
-            detailType: ['ECR Image Action'],
-            detail: {
-                'action-type': ['PUSH'],
-                'repository-name': [repository.repositoryName],
-            },
+                source: ['aws.ecr'],
+                detailType: ['ECR Image Action'],
+                detail: {
+                    'action-type': ['PUSH'],
+                    'repository-name': [repository.repositoryName],
+                }
             },
             targets: [new aws_events_targets.LambdaFunction(lambdaFunction)],
         });

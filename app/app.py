@@ -23,6 +23,10 @@ def testRoute2():
 def extraTest():
     return "Extra Test"
 
+@app.route("/extra-test2")
+def extraTes2t():
+    return "Extra Test 2"
+
 if __name__ == "__main__":
     hello_world()
     app.run(host="0.0.0.0", port=8080)
