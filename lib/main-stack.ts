@@ -1,5 +1,6 @@
-import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
+import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
 import { Construct } from "constructs";
+import path = require("path");
 
 interface VpcStackProps extends StackProps {
     natGateways: number
@@ -11,6 +12,9 @@ interface VpcStackProps extends StackProps {
 export class MainStack extends Stack {
     public vpc: aws_ec2.IVpc
     public sg: aws_ec2.ISecurityGroup
+    private ecrTag: string = 'latest'
+    private serviceName: string = 'app'
+    private containerPort: number = 8080
 
     /**
      * Creates a VPC with the given number of NAT Gateways and creates an
@@ -33,9 +37,17 @@ export class MainStack extends Stack {
         const cluster = this.createCluster('main', vpc);
         const alb = this.createAlb('main', vpc);
         const listener = this.createAlbListener(alb, cert);
-        const fargateService = this.createService(cluster, listener, ecsSecurityGroup, repo, 256, 512);
+
+
+        const envVars = {
+            PORT: this.containerPort.toString(),
+        }
+        const taskDefinition = this.taskDefinition('main', this.ecrTag, repo, 256, 512, this.containerPort, envVars);
+        const fargateService = this.createService(cluster, listener, ecsSecurityGroup, taskDefinition, this.serviceName);
         this.createAlbDomain(alb, domainName, hostedZoneId, subDomainName);
-        this.evenbridge(repo, cluster, fargateService);
+
+        const lambdaFunction = this.lambda(cluster, fargateService, taskDefinition);
+        this.eventBridge(repo, lambdaFunction);
     }
 
     private createVpc(vpcName: string, natGateways: number): aws_ec2.Vpc {
@@ -103,7 +115,7 @@ export class MainStack extends Stack {
         return repository
     }
 
-    createCluster(name: string, vpc: aws_ec2.IVpc) {
+    private createCluster(name: string, vpc: aws_ec2.IVpc) {
         const cluster = new aws_ecs.Cluster(this, `${name}-cluster`, {
             clusterName: name,
             vpc: vpc,
@@ -114,7 +126,14 @@ export class MainStack extends Stack {
         return cluster;
     }
 
-    createAlb(name: string, vpc: aws_ec2.IVpc) {
+    /**
+     * Creates an Elastic Load Balancer (ELB) for the given stack.
+     *
+     * @param name the name of the ELB
+     * @param vpc the VPC to create the ELB in
+     * @returns the created ELB
+     */
+    private createAlb(name: string, vpc: aws_ec2.IVpc) {
         const loadBalancer = new aws_elasticloadbalancingv2.ApplicationLoadBalancer(this, 'ALB', {
             loadBalancerName: name,
             vpc: vpc,
@@ -124,7 +143,15 @@ export class MainStack extends Stack {
         return loadBalancer
     }
     
-    createAlbListener(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, certificate: aws_certificatemanager.ICertificate) {
+    /**
+     * Creates an HTTPS listener for the given Application Load Balancer (ALB)
+     * and SSL certificate.
+     *
+     * @param alb the ALB to create the listener for
+     * @param certificate the SSL certificate to use for the listener
+     * @returns the created listener
+     */
+    private createAlbListener(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, certificate: aws_certificatemanager.ICertificate) {
         const listener = alb.addListener(`HttpsListener`, {
           port: 443,
           certificates: [certificate],
@@ -133,7 +160,15 @@ export class MainStack extends Stack {
         return listener;
     }
 
-    createAlbDomain(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, domainName: string, zoneId: string, subDomain: string) {
+    /**
+     * Creates an A record in the given hosted zone for the given subdomain, pointing to the given ALB.
+     *
+     * @param alb the ALB to point the A record at
+     * @param domainName the domain name of the hosted zone
+     * @param zoneId the ID of the hosted zone
+     * @param subDomain the subdomain to create the A record for
+     */
+    private createAlbDomain(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, domainName: string, zoneId: string, subDomain: string) {
         const hostedZone = aws_route53.HostedZone.fromHostedZoneAttributes(this, `${subDomain}-hosted-zone`, {
             hostedZoneId: zoneId,
             zoneName: domainName,
@@ -146,22 +181,39 @@ export class MainStack extends Stack {
         });
     }
 
-    createService(
-        cluster: aws_ecs.ICluster,
-        listener: aws_elasticloadbalancingv2.ApplicationListener, 
-        sg: aws_ec2.ISecurityGroup, 
+    /**
+     * Creates a Fargate task definition with a single container.
+     *
+     * The container is configured with the given CPU and memory limits, and
+     * is given the given name. The container is also given the given
+     * environment variables.
+     *
+     * The task definition is granted access to Secrets Manager, and is
+     * configured to log to CloudWatch Logs with a retention period of one
+     * day.
+     *
+     * @param serviceName The name of the task definition and its container.
+     * @param ecrTag The tag of the ECR repository to use for the container's
+     * image.
+     * @param repository The ECR repository containing the image.
+     * @param cpu The CPU limit for the container, in units of 10^2 CPU
+     * shares. Defaults to 256 (1 vCPU).
+     * @param memory The memory limit for the container, in MiB. Defaults to
+     * 512.
+     * @param containerPort The port number to expose from the container.
+     * Defaults to 8080.
+     * @param envVars Additional environment variables to set in the
+     * container.
+     */
+    private taskDefinition(
+        serviceName: string,
+        ecrTag: string,
         repository: aws_ecr.IRepository,
         cpu: number = 256, 
         memory: number = 512,
-    ) {
-        const ecrTag = 'latest'
-        const serviceName = 'app'
-        const containerPort = 8080
-        const envVars = {
-            PORT: containerPort.toString(),
-        }
-
-        // task definition
+        containerPort: number = 8080,
+        envVars: { [key: string]: string } = {}
+    ): aws_ecs.FargateTaskDefinition {
         const taskDefinition = new aws_ecs.FargateTaskDefinition(this, `${serviceName}-task-def`, {
             family: serviceName,
             memoryLimitMiB: memory,
@@ -193,9 +245,40 @@ export class MainStack extends Stack {
             // },
             portMappings: [{ containerPort }]
         })
-        
-        // service
-        const service = new aws_ecs.FargateService(this, `${serviceName}-service`, {
+
+        return taskDefinition
+    }
+
+    /**
+     * Creates a Fargate service with autoscaling and adds it to the given
+     * ALB listener.
+     *
+     * The service is configured to run one task at a time, and is given a
+     * security group that allows incoming HTTP traffic. The task definition
+     * is also configured to allow executing command-line commands on the
+     * container.
+     *
+     * The service is then added to the given listener with a health check
+     * that checks the `/health` endpoint.
+     *
+     * @param cluster The ECS cluster to deploy the service to.
+     * @param listener The ALB listener to add the service to.
+     * @param sg The security group to assign to the service. This should allow
+     * incoming HTTP traffic.
+     * @param taskDefinition The task definition to use for the service.
+     * @param serviceName The name of the service, which is also used as the
+     * name of the task definition.
+     *
+     * @returns The created service.
+     */
+    private createService(
+        cluster: aws_ecs.ICluster,
+        listener: aws_elasticloadbalancingv2.ApplicationListener, 
+        sg: aws_ec2.ISecurityGroup, 
+        taskDefinition: aws_ecs.FargateTaskDefinition,
+        serviceName: string
+    ): aws_ecs.FargateService {
+        const fargateService = new aws_ecs.FargateService(this, `${serviceName}-service`, {
             serviceName,
             cluster: cluster,
             securityGroups: [sg],
@@ -206,20 +289,20 @@ export class MainStack extends Stack {
             enableExecuteCommand: true,
           });
           
-          service.taskDefinition.taskRole.addManagedPolicy(
+          fargateService.taskDefinition.taskRole.addManagedPolicy(
             aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
           );
       
 
         // autoscaling
-        const scaling = service.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 2 });
+        const scaling = fargateService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 2 });
         scaling.scaleOnCpuUtilization('CpuScaling', { targetUtilizationPercent: 50 });
         scaling.scaleOnMemoryUtilization('MemoryScaling', { targetUtilizationPercent: 50 });
         
         // add to listener
         listener.addTargets(`${serviceName}-target`, {
             protocol: aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
-            targets: [service],
+            targets: [fargateService],
             healthCheck: {
               protocol: aws_elasticloadbalancingv2.Protocol.HTTP,
               path: '/health',
@@ -227,36 +310,75 @@ export class MainStack extends Stack {
             },
         });
 
-        return service
+        return fargateService
     }
 
-    private evenbridge(repository: aws_ecr.IRepository, cluster: aws_ecs.ICluster, service: aws_ecs.FargateService) {
-        // EventBridge Rule for ECR Image Push
-        const rule = new aws_events.Rule(this, 'EcrImagePushRule', {
-            eventPattern: {
-                source: ['aws.ecr'],
-                detailType: ['ECR Image Action'],
-                detail: {
-                    'action-type': ['PUSH'],
-                    'repository-name': [repository.repositoryName],
-                },
+    /**
+     * Creates a Lambda Function to Update ECS Service
+     * 
+     * The Lambda Function is triggered by an EventBridge Rule that listens for ECR Image Push events.
+     * When the Lambda Function is triggered, it updates the ECS Service to use the new task definition.
+     * 
+     * @param cluster The ECS Cluster.
+     * @param fargateService The ECS Service to update.
+     * @param taskDefinition The ECS Task Definition to use for the update.
+     */
+    private lambda(
+        cluster: aws_ecs.ICluster,
+        fargateService: aws_ecs.FargateService,
+        taskDefinition: aws_ecs.FargateTaskDefinition
+    ): aws_lambda.IFunction {
+        const lambdaRole = new aws_iam.Role(this, 'LambdaExecutionRole', {
+                assumedBy: new aws_iam.ServicePrincipal('lambda.amazonaws.com'),
+            });
+            lambdaRole.addManagedPolicy(
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+            );
+            lambdaRole.addManagedPolicy(
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonECS_FullAccess')
+            );
+            lambdaRole.addManagedPolicy(
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
+            );
+
+        // Lambda Function to Update ECS Service
+        const lambdaFunction = new aws_lambda.Function(this, 'EcsUpdateLambda', {
+            runtime: aws_lambda.Runtime.NODEJS_18_X,
+            code: aws_lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+            handler: 'index.handler',
+            environment: {
+                CLUSTER_NAME: cluster.clusterName,
+                SERVICE_NAME: fargateService.serviceName,
+                TASK_DEFINITION: taskDefinition.taskDefinitionArn,
             },
+            role: lambdaRole,
         });
-    
-        // EventBridge Target: ECS Service Deployment
-        rule.addTarget(new aws_events_targets.EcsTask({
-            cluster,
-            taskDefinition: service.taskDefinition,
-            role: service.taskDefinition.taskRole,
-            containerOverrides: [{
-                containerName: 'app',
-                environment: [
-                    {
-                        name: 'IMAGE_URI',
-                        value: `${repository.repositoryUri}:latest`,
-                    },
-                ],
-            }],
-        }));
+
+        return lambdaFunction
+    }
+
+    /**
+     * Creates an EventBridge Rule to trigger the lambda function when a new image is
+     * pushed to the given ECR repository.
+     *
+     * @param repository The ECR repository to listen to for new image pushes.
+     * @param lambdaFunction The lambda function to trigger when a new image is pushed.
+     */
+    private eventBridge(
+        repository: aws_ecr.IRepository,
+        lambdaFunction: aws_lambda.IFunction
+    ) {
+        new aws_events.Rule(this, 'EcrPushEventRule', {
+            eventPattern: {
+            source: ['aws.ecr'],
+            detailType: ['ECR Image Action'],
+            detail: {
+                'action-type': ['PUSH'],
+                'repository-name': [repository.repositoryName],
+            },
+            },
+            targets: [new aws_events_targets.LambdaFunction(lambdaFunction)],
+        });
+  
     }
 }
