@@ -1,4 +1,4 @@
-import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
+import { Duration, Stack, StackProps, aws_autoscaling, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
 import { Runtime } from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { Construct } from "constructs";
@@ -123,6 +123,21 @@ export class MainStack extends Stack {
             containerInsights: true,
             enableFargateCapacityProviders: true,
         });
+
+        // TODO: enable spot instances
+        // const autoScalingGroup = new aws_ecs.AsgCapacityProvider(this, 'AsgCapacityProvider', {
+        //     autoScalingGroup: new aws_autoscaling.AutoScalingGroup(this, 'AutoScalingGroup', {
+        //         vpc: vpc,
+        //         machineImage: aws_ecs.EcsOptimizedImage.amazonLinux2(),
+        //         instanceType: new aws_ec2.InstanceType('t2.micro'),
+        //         spotPrice: '0.01',
+        //         minCapacity: 1,
+        //         maxCapacity: 10,
+        //         desiredCapacity: 2
+        //     })
+        // });
+
+        // cluster.addAsgCapacityProvider(autoScalingGroup);
     
         return cluster;
     }
@@ -222,8 +237,8 @@ export class MainStack extends Stack {
             cpu: cpu,
             runtimePlatform: {
                 operatingSystemFamily: aws_ecs.OperatingSystemFamily.LINUX,
-                cpuArchitecture: aws_ecs.CpuArchitecture.X86_64,
-            }
+                cpuArchitecture: aws_ecs.CpuArchitecture.ARM64,
+            },
         })
 
         taskDefinition.addToTaskRolePolicy(new aws_iam.PolicyStatement({
