@@ -1,4 +1,6 @@
 import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
+import { Runtime } from "aws-cdk-lib/aws-lambda";
+import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { Construct } from "constructs";
 import path = require("path");
 
@@ -323,7 +325,6 @@ export class MainStack extends Stack {
      * @param fargateService The ECS Service to update.
      * @param taskDefinition The ECS Task Definition to use for the update.
      */
-    // TODO: Node JS Function
     private lambda(
         cluster: aws_ecs.ICluster,
         fargateService: aws_ecs.FargateService,
@@ -343,17 +344,20 @@ export class MainStack extends Stack {
             );
 
         // Lambda Function to Update ECS Service
-        const lambdaFunction = new aws_lambda.Function(this, 'EcsUpdateLambda', {
-            runtime: aws_lambda.Runtime.NODEJS_18_X,
-            code: aws_lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
-            handler: 'index.handler',
-            environment: {
-                CLUSTER_NAME: cluster.clusterName,
-                SERVICE_NAME: fargateService.serviceName,
-                TASK_DEFINITION: taskDefinition.taskDefinitionArn,
-            },
+        const lambdaFunction = new NodejsFunction(this, 'LambdaFunction', {
+            entry: path.join(__dirname, '../lambda/index.js'),
+            handler: 'handler',
+            runtime: aws_lambda.Runtime.NODEJS_22_X,
             role: lambdaRole,
-        });
+            environment: {
+              CLUSTER_NAME: cluster.clusterName,
+              SERVICE_NAME: fargateService.serviceName,
+            },
+            bundling: {
+              externalModules: ['@aws-sdk/client-ecs'], // Avoid bundling AWS SDK to reduce size
+            },
+      
+        })
 
         return lambdaFunction
     }
