@@ -1,32 +1,31 @@
-from flask import Flask
+from fastapi import FastAPI
 
-app = Flask(__name__)
+app = FastAPI()
 
-@app.route("/")
-def hello_world():
-    print("Hello, World!")
-    return "Hello, World!"
+@app.get("/")
+async def hello_world():
+    return {"message": "Hello, World!"}
 
-@app.route("/health")
-def health():
-    return "OK"
+@app.get("/health")
+async def health():
+    return {"status": "OK"}
 
-@app.route("/test")
-def testRoute():
-    return "Tested"
+@app.get("/test")
+async def test_route():
+    return {"message": "Tested"}
 
-@app.route("/test-again")
-def testRoute2():
-    return "Tested 2"
+@app.get("/test-again")
+async def test_route_2():
+    return {"message": "Tested 2"}
 
-@app.route("/extra-test")
-def extraTest():
-    return "Extra Test"
+@app.get("/extra-test")
+async def extra_test():
+    return {"message": "Extra Test"}
 
-@app.route("/extra-test2")
-def extraTes2t():
-    return "Extra Test 2"
+@app.get("/extra-test2")
+async def extra_test_2():
+    return {"message": "Extra Test 2"}
 
 if __name__ == "__main__":
-    hello_world()
-    app.run(host="0.0.0.0", port=8080)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)

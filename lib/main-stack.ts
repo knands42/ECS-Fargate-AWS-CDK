@@ -27,9 +27,9 @@ export class MainStack extends Stack {
      */
     constructor(scope: Construct, id: string, props: VpcStackProps) {
         super(scope, id, props);
-        const { natGateways, domainName, hostedZoneId, subDomainName } = props;
+        const { domainName, hostedZoneId, subDomainName } = props;
 
-        const vpc = this.createVpc('custom-vpc', natGateways);
+        const vpc = this.createVpc('custom-vpc');
         const ecsSecurityGroup = this.createEcsSecurityGroup(vpc)
         
         const cert = this.createCertificate(domainName, hostedZoneId);
@@ -43,29 +43,18 @@ export class MainStack extends Stack {
             PORT: this.containerPort.toString(),
         }
         const taskDefinition = this.taskDefinition('main', this.ecrTag, repo, 256, 512, this.containerPort, envVars);
-        const fargateService = this.createService(cluster, listener, ecsSecurityGroup, taskDefinition, this.serviceName);
+        const fargateService = this.createService(cluster, listener, ecsSecurityGroup, taskDefinition, alb, this.serviceName);
         this.createAlbDomain(alb, domainName, hostedZoneId, subDomainName);
 
-        const lambdaFunction = this.lambda(cluster, fargateService);
+        const lambdaFunction = this.lambda(cluster, fargateService.service);
         this.eventBridge(repo, lambdaFunction);
     }
 
-    private createVpc(vpcName: string, natGateways: number): aws_ec2.Vpc {
+    private createVpc(vpcName: string): aws_ec2.Vpc {
         const vpc = new aws_ec2.Vpc(this, 'custom-vpc', {
             vpcName,
             maxAzs: 2,
-            natGateways,
             subnetConfiguration: [
-                {
-                  cidrMask: 24,
-                  name: 'public',
-                  subnetType: aws_ec2.SubnetType.PUBLIC,
-                },
-                {
-                  cidrMask: 24,
-                  name: 'private',
-                  subnetType: aws_ec2.SubnetType.PRIVATE_WITH_EGRESS,
-                },
                 {
                   cidrMask: 24,
                   name: 'isolated',
@@ -152,9 +141,13 @@ export class MainStack extends Stack {
         const loadBalancer = new aws_elasticloadbalancingv2.ApplicationLoadBalancer(this, 'ALB', {
             loadBalancerName: name,
             vpc: vpc,
-            internetFacing: true,
+            internetFacing: false,
+            vpcSubnets: {
+              subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            }
           });
 
+        // remove internet facing 
         return loadBalancer
     }
     
@@ -169,8 +162,8 @@ export class MainStack extends Stack {
     // TODO: add support for multiple listeners, https for public subnet and http for private subnet
     private createAlbListener(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, certificate: aws_certificatemanager.ICertificate) {
         const listener = alb.addListener(`HttpsListener`, {
-          port: 443,
-          certificates: [certificate],
+            protocol: aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
+            port: 8080,
         });
     
         return listener;
@@ -292,87 +285,37 @@ export class MainStack extends Stack {
         listener: aws_elasticloadbalancingv2.ApplicationListener, 
         sg: aws_ec2.ISecurityGroup, 
         taskDefinition: aws_ecs.FargateTaskDefinition,
+        loadBalancer: aws_elasticloadbalancingv2.ApplicationLoadBalancer,
         serviceName: string
-    ): aws_ecs.FargateService {
-        // Queue Processing Pattern if needed to scale based on messages in queue
-        function queueProcessingFargateService(this: MainStack) {
-            const fargateService = new aws_ecs_patterns.QueueProcessingFargateService(this, `${serviceName}-service`, {
-                cluster, 
-                cpu: 512, 
-                memoryLimitMiB: 1024,
-                taskDefinition,
-                enableLogging: true, // Enable CloudWatch logging
-                minScalingCapacity: 1, // Minimum number of tasks
-                maxScalingCapacity: 10, // Maximum number of tasks
-                // capacityProviderStrategies: [
-                //   {
-                //     capacityProvider: 'FARGATE_SPOT',
-                //     weight: 1
-                //   },
-                //   {
-                //     capacityProvider: 'FARGATE',
-                //     weight: 1
-                //   } 
-                // ],
-                scalingSteps: [{ upper: 0, change: -1 },{ lower: 100, change: +1 },{ lower: 500, change: +5 }],
-              });
-              
-            fargateService.taskDefinition.taskRole.addManagedPolicy(
-                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
-            );
-        }
-
-        function loadBalancerFargetService(this: MainStack) {
-            const fargateService = new aws_ecs_patterns.ApplicationLoadBalancedFargateService(this, `${serviceName}-service`, {
-                cluster, 
-                cpu: 512, 
-                memoryLimitMiB: 1024,
-                taskDefinition,
-                desiredCount: 1,
-                taskImageOptions: {
-                    image: aws_ecs.ContainerImage.fromEcrRepository(repository, 'latest'),
-                },
-            })
-
-            const scalableTarget = fargateService.service.autoScaleTaskCount({
-                minCapacity: 1,
-                maxCapacity: 20,
-              });
-              
-              scalableTarget.scaleOnCpuUtilization('CpuScaling', {
-                targetUtilizationPercent: 50,
-              });
-              
-              scalableTarget.scaleOnMemoryUtilization('MemoryScaling', {
-                targetUtilizationPercent: 50,
-              });
-        }
-
-        const fargateService = new aws_ecs.FargateService(this, `${serviceName}-service`, {
-            serviceName,
-            cluster: cluster,
+    ): aws_ecs_patterns.ApplicationLoadBalancedFargateService {
+        const fargateService = new aws_ecs_patterns.ApplicationLoadBalancedFargateService(this, `${serviceName}-service`, {
+            cluster, 
+            cpu: 512, 
+            memoryLimitMiB: 1024,
             securityGroups: [sg],
             taskDefinition,
             desiredCount: 1,
-            minHealthyPercent: 100,
-            maxHealthyPercent: 200,
-            enableExecuteCommand: true,
-          });
+            loadBalancer: loadBalancer,
+        })
 
-          fargateService.taskDefinition.taskRole.addManagedPolicy(
-            aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
-          );
-      
+        const scalableTarget = fargateService.service.autoScaleTaskCount({
+            minCapacity: 1,
+            maxCapacity: 20,
+            });
+            
+            scalableTarget.scaleOnCpuUtilization('CpuScaling', {
+            targetUtilizationPercent: 80,
+            });
+            
+            scalableTarget.scaleOnMemoryUtilization('MemoryScaling', {
+            targetUtilizationPercent: 80,
+        });
 
-        // autoscaling
-        const scaling = fargateService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 2 });
-        scaling.scaleOnCpuUtilization('CpuScaling', { targetUtilizationPercent: 50 });
-        scaling.scaleOnMemoryUtilization('MemoryScaling', { targetUtilizationPercent: 50 });
         
         // add to listener
         listener.addTargets(`${serviceName}-target`, {
             protocol: aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
-            targets: [fargateService],
+            targets: [fargateService.service],
             healthCheck: {
               protocol: aws_elasticloadbalancingv2.Protocol.HTTP,
               path: '/health',
