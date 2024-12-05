@@ -1,5 +1,4 @@
-import { Duration, Stack, StackProps, aws_autoscaling, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
-import { Runtime } from "aws-cdk-lib/aws-lambda";
+import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { Construct } from "constructs";
 import path = require("path");
@@ -47,7 +46,7 @@ export class MainStack extends Stack {
         const fargateService = this.createService(cluster, listener, ecsSecurityGroup, taskDefinition, this.serviceName);
         this.createAlbDomain(alb, domainName, hostedZoneId, subDomainName);
 
-        const lambdaFunction = this.lambda(cluster, fargateService, taskDefinition);
+        const lambdaFunction = this.lambda(cluster, fargateService);
         this.eventBridge(repo, lambdaFunction);
     }
 
@@ -295,6 +294,60 @@ export class MainStack extends Stack {
         taskDefinition: aws_ecs.FargateTaskDefinition,
         serviceName: string
     ): aws_ecs.FargateService {
+        // Queue Processing Pattern if needed to scale based on messages in queue
+        function queueProcessingFargateService(this: MainStack) {
+            const fargateService = new aws_ecs_patterns.QueueProcessingFargateService(this, `${serviceName}-service`, {
+                cluster, 
+                cpu: 512, 
+                memoryLimitMiB: 1024,
+                taskDefinition,
+                enableLogging: true, // Enable CloudWatch logging
+                minScalingCapacity: 1, // Minimum number of tasks
+                maxScalingCapacity: 10, // Maximum number of tasks
+                // capacityProviderStrategies: [
+                //   {
+                //     capacityProvider: 'FARGATE_SPOT',
+                //     weight: 1
+                //   },
+                //   {
+                //     capacityProvider: 'FARGATE',
+                //     weight: 1
+                //   } 
+                // ],
+                scalingSteps: [{ upper: 0, change: -1 },{ lower: 100, change: +1 },{ lower: 500, change: +5 }],
+              });
+              
+            fargateService.taskDefinition.taskRole.addManagedPolicy(
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
+            );
+        }
+
+        function loadBalancerFargetService(this: MainStack) {
+            const fargateService = new aws_ecs_patterns.ApplicationLoadBalancedFargateService(this, `${serviceName}-service`, {
+                cluster, 
+                cpu: 512, 
+                memoryLimitMiB: 1024,
+                taskDefinition,
+                desiredCount: 1,
+                taskImageOptions: {
+                    image: aws_ecs.ContainerImage.fromEcrRepository(repository, 'latest'),
+                },
+            })
+
+            const scalableTarget = fargateService.service.autoScaleTaskCount({
+                minCapacity: 1,
+                maxCapacity: 20,
+              });
+              
+              scalableTarget.scaleOnCpuUtilization('CpuScaling', {
+                targetUtilizationPercent: 50,
+              });
+              
+              scalableTarget.scaleOnMemoryUtilization('MemoryScaling', {
+                targetUtilizationPercent: 50,
+              });
+        }
+
         const fargateService = new aws_ecs.FargateService(this, `${serviceName}-service`, {
             serviceName,
             cluster: cluster,
@@ -305,7 +358,7 @@ export class MainStack extends Stack {
             maxHealthyPercent: 200,
             enableExecuteCommand: true,
           });
-          
+
           fargateService.taskDefinition.taskRole.addManagedPolicy(
             aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
           );
@@ -330,6 +383,7 @@ export class MainStack extends Stack {
         return fargateService
     }
 
+
     /**
      * Creates a Lambda Function to Update ECS Service
      * 
@@ -343,7 +397,6 @@ export class MainStack extends Stack {
     private lambda(
         cluster: aws_ecs.ICluster,
         fargateService: aws_ecs.FargateService,
-        taskDefinition: aws_ecs.FargateTaskDefinition
     ): aws_lambda.IFunction {
         const lambdaRole = new aws_iam.Role(this, 'LambdaExecutionRole', {
                 assumedBy: new aws_iam.ServicePrincipal('lambda.amazonaws.com'),
