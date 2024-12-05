@@ -1,4 +1,4 @@
-import { Duration, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
+import { Duration, RemovalPolicy, Stack, StackProps, aws_certificatemanager, aws_ec2, aws_ecr, aws_ecs, aws_ecs_patterns, aws_elasticloadbalancingv2, aws_events, aws_events_targets, aws_iam, aws_lambda, aws_logs, aws_route53, aws_route53_targets } from "aws-cdk-lib";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import { Construct } from "constructs";
 import path = require("path");
@@ -35,14 +35,14 @@ export class MainStack extends Stack {
         const cert = this.createCertificate(domainName, hostedZoneId);
         const repo = this.createRepository('my-repo');
 
-        const cluster = this.createCluster('main', vpc);
-        const alb = this.createAlb('main', vpc);
+        const cluster = this.createCluster(this.serviceName, vpc);
+        const alb = this.createAlb(this.serviceName, vpc);
         const listener = this.createAlbListener(alb, cert);
 
         const envVars = {
             PORT: this.containerPort.toString(),
         }
-        const taskDefinition = this.taskDefinition('main', this.ecrTag, repo, 256, 512, this.containerPort, envVars);
+        const taskDefinition = this.taskDefinition(this.serviceName, this.ecrTag, repo, 1024, 4096, this.containerPort, envVars);
         const fargateService = this.createService(cluster, listener, ecsSecurityGroup, taskDefinition, alb, this.serviceName);
         this.createAlbDomain(alb, domainName, hostedZoneId, subDomainName);
 
@@ -112,7 +112,6 @@ export class MainStack extends Stack {
             enableFargateCapacityProviders: true,
         });
 
-        // TODO: enable spot instances
         // const autoScalingGroup = new aws_ecs.AsgCapacityProvider(this, 'AsgCapacityProvider', {
         //     autoScalingGroup: new aws_autoscaling.AutoScalingGroup(this, 'AutoScalingGroup', {
         //         vpc: vpc,
@@ -218,7 +217,7 @@ export class MainStack extends Stack {
         serviceName: string,
         ecrTag: string,
         repository: aws_ecr.IRepository,
-        cpu: number = 256, 
+        cpu: number = 512, 
         memory: number = 512,
         containerPort: number = 8080,
         envVars: { [key: string]: string } = {}
@@ -246,7 +245,11 @@ export class MainStack extends Stack {
             logging: aws_ecs.LogDriver.awsLogs({
                 streamPrefix: serviceName,
                 mode: aws_ecs.AwsLogDriverMode.NON_BLOCKING,
-                logRetention: aws_logs.RetentionDays.ONE_DAY,
+                logGroup: new aws_logs.LogGroup(this, `${serviceName}-log-group`, {
+                    logGroupName: `/ecs/${serviceName}`,
+                    retention: aws_logs.RetentionDays.ONE_DAY,
+                    removalPolicy: RemovalPolicy.DESTROY
+                })    
             }),
             // healthCheck: {
             //     command: ['CMD-SHELL', 'curl --fail http://localhost:8080/health || exit 1'],
@@ -291,27 +294,28 @@ export class MainStack extends Stack {
         const fargateService = new aws_ecs_patterns.ApplicationLoadBalancedFargateService(this, `${serviceName}-service`, {
             cluster, 
             cpu: 512, 
-            memoryLimitMiB: 1024,
+            memoryLimitMiB: 512,
             securityGroups: [sg],
             taskDefinition,
+            taskSubnets: { subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED },
             desiredCount: 1,
             loadBalancer: loadBalancer,
         })
 
+        // autoscaling
         const scalableTarget = fargateService.service.autoScaleTaskCount({
             minCapacity: 1,
             maxCapacity: 20,
-            });
+        });
             
-            scalableTarget.scaleOnCpuUtilization('CpuScaling', {
+        scalableTarget.scaleOnCpuUtilization('CpuScaling', {
             targetUtilizationPercent: 80,
-            });
+        });
             
-            scalableTarget.scaleOnMemoryUtilization('MemoryScaling', {
+        scalableTarget.scaleOnMemoryUtilization('MemoryScaling', {
             targetUtilizationPercent: 80,
         });
 
-        
         // add to listener
         listener.addTargets(`${serviceName}-target`, {
             protocol: aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
