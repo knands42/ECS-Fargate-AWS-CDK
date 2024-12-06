@@ -11,11 +11,9 @@ interface VpcStackProps extends StackProps {
 }
 
 export class MainStack extends Stack {
-    public vpc: aws_ec2.IVpc
-    public sg: aws_ec2.ISecurityGroup
     private ecrTag: string = 'latest'
     private serviceName: string = 'app'
-    private containerPort: number = 8080
+    private containerPort: number = 8030
 
     /**
      * Creates a VPC with the given number of NAT Gateways and creates an
@@ -48,6 +46,7 @@ export class MainStack extends Stack {
 
         const lambdaFunction = this.lambda(cluster, fargateService.service);
         this.eventBridge(repo, lambdaFunction);
+        this.createVpcEndpoints(vpc, ecsSecurityGroup);
     }
 
     private createVpc(vpcName: string): aws_ec2.Vpc {
@@ -72,10 +71,19 @@ export class MainStack extends Stack {
             vpc: vpc,
             allowAllOutbound: true
         })
-        
-        sg.addIngressRule(aws_ec2.Peer.anyIpv4(), aws_ec2.Port.tcp(80), 'All TCP Ports')
-        this.sg = sg
-        return sg
+
+        sg.addIngressRule(
+            aws_ec2.Peer.anyIpv4(),
+            aws_ec2.Port.allTcp(),
+            'Allow traffic from within VPC'
+        );
+    
+        sg.addIngressRule(
+            aws_ec2.Peer.anyIpv4(),
+            aws_ec2.Port.allTcp(),
+            'Allow inbound traffic on container port'
+        );
+            return sg
     }
 
     private createCertificate(domainName: string, hostedZoneId: string) {
@@ -91,7 +99,7 @@ export class MainStack extends Stack {
         });
     
         return certificate;
-      }
+    }
 
     private createRepository(repositoryName: string): aws_ecr.IRepository {
         const repository = new aws_ecr.Repository(this, `ecr`, {
@@ -162,7 +170,7 @@ export class MainStack extends Stack {
     private createAlbListener(alb: aws_elasticloadbalancingv2.ApplicationLoadBalancer, certificate: aws_certificatemanager.ICertificate) {
         const listener = alb.addListener(`HttpsListener`, {
             protocol: aws_elasticloadbalancingv2.ApplicationProtocol.HTTP,
-            port: 8080,
+            port: 8030,
         });
     
         return listener;
@@ -209,7 +217,7 @@ export class MainStack extends Stack {
      * @param memory The memory limit for the container, in MiB. Defaults to
      * 512.
      * @param containerPort The port number to expose from the container.
-     * Defaults to 8080.
+     * Defaults to 8030.
      * @param envVars Additional environment variables to set in the
      * container.
      */
@@ -219,13 +227,22 @@ export class MainStack extends Stack {
         repository: aws_ecr.IRepository,
         cpu: number = 512, 
         memory: number = 512,
-        containerPort: number = 8080,
+        containerPort: number = 8030,
         envVars: { [key: string]: string } = {}
     ): aws_ecs.FargateTaskDefinition {
+        const executionRole = new aws_iam.Role(this, `${serviceName}-execution-role`, {
+            assumedBy: new aws_iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+            managedPolicies: [
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
+            ]
+        });
+    
         const taskDefinition = new aws_ecs.FargateTaskDefinition(this, `${serviceName}-task-def`, {
             family: serviceName,
             memoryLimitMiB: memory,
             cpu: cpu,
+            taskRole: executionRole,
             runtimePlatform: {
                 operatingSystemFamily: aws_ecs.OperatingSystemFamily.LINUX,
                 cpuArchitecture: aws_ecs.CpuArchitecture.ARM64,
@@ -252,7 +269,7 @@ export class MainStack extends Stack {
                 })    
             }),
             // healthCheck: {
-            //     command: ['CMD-SHELL', 'curl --fail http://localhost:8080/health || exit 1'],
+            //     command: ['CMD-SHELL', 'curl --fail http://localhost:8030/health || exit 1'],
             //     interval: Duration.seconds(30),
             // },
             portMappings: [{ containerPort }]
@@ -357,6 +374,16 @@ export class MainStack extends Stack {
             lambdaRole.addManagedPolicy(
                 aws_iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly')
             );
+            lambdaRole.addManagedPolicy(
+                aws_iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole')
+            );
+        
+
+        const lambdaSg = new aws_ec2.SecurityGroup(this, 'lambda-sg', {
+            vpc: cluster.vpc,
+            allowAllOutbound: true,
+            description: 'Security group for Lambda function'
+        });
 
         // Lambda Function to Update ECS Service
         const lambdaFunction = new NodejsFunction(this, 'LambdaFunction', {
@@ -368,6 +395,9 @@ export class MainStack extends Stack {
               CLUSTER_NAME: cluster.clusterName,
               SERVICE_NAME: fargateService.serviceName,
             },
+            vpc: cluster.vpc,
+            vpcSubnets: { subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED },
+            securityGroups: [lambdaSg],
             bundling: {
               externalModules: ['@aws-sdk/client-ecs'], // Avoid bundling AWS SDK to reduce size
             },
@@ -400,5 +430,85 @@ export class MainStack extends Stack {
             targets: [new aws_events_targets.LambdaFunction(lambdaFunction)],
         });
   
+    }
+
+    private createVpcEndpoints(vpc: aws_ec2.IVpc, sg: aws_ec2.SecurityGroup) {
+        vpc.addInterfaceEndpoint('ecr-docker', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+        });
+
+        vpc.addInterfaceEndpoint('ecr-api', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.ECR,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
+
+        vpc.addInterfaceEndpoint('ecr-ecs', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.ECS,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
+
+        vpc.addGatewayEndpoint('s3-endpoint', {
+            service: aws_ec2.GatewayVpcEndpointAwsService.S3,
+            subnets: [{
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            }],
+        });
+
+        vpc.addInterfaceEndpoint('ecr-sts', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.STS,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
+
+        vpc.addInterfaceEndpoint('logs', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
+
+        vpc.addInterfaceEndpoint('events', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.EVENTBRIDGE,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
+    
+        vpc.addInterfaceEndpoint('lambda', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.LAMBDA,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
+
+        vpc.addInterfaceEndpoint('secretmanager', {
+            service: aws_ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+            privateDnsEnabled: true,
+            subnets: {
+                subnetType: aws_ec2.SubnetType.PRIVATE_ISOLATED
+            },
+            securityGroups: [sg],
+        });
     }
 }

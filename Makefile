@@ -13,7 +13,7 @@ deploy:
 push-to-ecr:
 	aws ecr get-login-password --region  $(REGION) | docker login --username AWS --password-stdin $(ACCOUNT_ID).dkr.ecr.$(REGION).amazonaws.com
 
-	docker build -t my-repo .
+	docker build --platform linux/arm64 -t my-repo .
 	docker tag my-repo:latest $(ACCOUNT_ID).dkr.ecr.$(REGION).amazonaws.com/my-repo:latest
 	docker push $(ACCOUNT_ID).dkr.ecr.$(REGION).amazonaws.com/my-repo:latest
 
